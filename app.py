@@ -97,142 +97,126 @@ def main():
 
     # Process data
     try:
-        # Try to use the expected column names
-        companies = df[['company', 'country', 'raised_usd', 'employees', 'website_url']].drop_duplicates()
-    except KeyError:
-        # If expected columns aren't found, try to map the actual column names
-        try:
-            companies = df[[
-                'results__funded_organization_identifier__value',
-                'country',  # This might not exist in the data
-                'results__money_raised__value_usd',
-                'employees',  # This might not exist in the data
-                'website_url'  # This might not exist in the data
-            ]].drop_duplicates()
-            companies.columns = ['company', 'country', 'raised_usd', 'employees', 'website_url']
-        except KeyError:
-            st.error("Error: Required columns not found in the dataset.")
-            return
-
-    # Add default values for missing columns
-    if 'country' not in companies.columns:
-        companies['country'] = 'Unknown'
-    if 'employees' not in companies.columns:
+        # Transform the funding rounds data to get company-level information
+        companies = df.groupby('results__funded_organization_identifier__uuid').agg({
+            'results__funded_organization_identifier__value': 'first',  # company name
+            'results__funded_organization_identifier__permalink': 'first',  # website URL
+            'results__money_raised__value_usd': 'sum',  # total raised
+            'results__announced_on': 'max'  # latest funding date
+        }).reset_index()
+        
+        companies.columns = ['uuid', 'company', 'website_url', 'raised_usd', 'latest_funding']
+        
+        # Add default values
         companies['employees'] = 1  # Default to 1 to avoid division by zero
-    if 'website_url' not in companies.columns:
-        companies['website_url'] = ''
-
-    # Fetch extra data if requested
-    if st.button("Fetch Extra Data"):
-        st.info("Fetching additional data... This may take a while.")
-        extra_data = {}
-        for _, row in companies.iterrows():
-            company_data = fetch_company_data(row['company'], row['website_url'])
-            extra_data[row['company']] = company_data
+        companies['country'] = 'Unknown'  # We don't have country data in this dataset
         
-        # Update dataframe with extra data
-        companies['languages'] = companies['company'].map(lambda x: extra_data.get(x, {}).get('languages', 0))
-        companies['rating'] = companies['company'].map(lambda x: extra_data.get(x, {}).get('rating', 'N/A'))
-    
-    # Calculate pillar scores
-    companies['efficiency'] = companies['raised_usd'] / companies['employees']
-    
-    # Handle any NaN values
-    companies = companies.replace([np.inf, -np.inf], np.nan)
-    companies = companies.fillna({
-        'efficiency': 0,
-        'languages': 0,
-        'rating': 'N/A'
-    })
-
-    # Scale scores to 0-100
-    scaler = MinMaxScaler(feature_range=(0, 100))
-    companies['access_score'] = scaler.fit_transform(companies[['languages']])
-    companies['efficiency_score'] = scaler.fit_transform(companies[['efficiency']])
-    companies['service_quality_score'] = companies['rating'].apply(
-        lambda x: 0 if x == 'N/A' else float(x)
-    )
-    
-    # Scale scores to 0-100
-    scaler = MinMaxScaler(feature_range=(0, 100))
-    companies['access_score'] = scaler.fit_transform(companies[['languages']])
-    companies['efficiency_score'] = scaler.fit_transform(companies[['efficiency']])
-    companies['service_quality_score'] = companies['rating'].apply(
-        lambda x: 0 if x == 'N/A' else float(x)
-    )
-    
-    # Calculate overall score
-    companies['overall_score'] = companies[['access_score', 'efficiency_score', 'service_quality_score']].mean(axis=1)
-    companies['moonfire_rank'] = companies['overall_score'].rank(ascending=False)
-    
-    # Create scatter plot
-    fig = px.scatter(
-        companies,
-        x='languages',
-        y='efficiency',
-        size='service_quality_score',
-        color='country',
-        hover_data=['company', 'access_score', 'efficiency_score', 'service_quality_score'],
-        title="Golden-Triangle Scorecard Visualization"
-    )
-    st.plotly_chart(fig)
-
-    # Create Ag-Grid table
-    gb = GridOptionsBuilder.from_dataframe(companies)
-    gb.configure_pagination()
-    gb.configure_default_column(editable=False, groupable=True)
-    gb.configure_column("company", header_name="Company")
-    gb.configure_column("country", header_name="Country")
-    gb.configure_column("access_score", header_name="ACCESS Score")
-    gb.configure_column("efficiency_score", header_name="EFFICIENCY Score")
-    gb.configure_column("service_quality_score", header_name="SERVICE QUALITY Score")
-    gb.configure_column("overall_score", header_name="Overall Score")
-    gb.configure_column("moonfire_rank", header_name="Moonfire Rank")
-    
-    gridOptions = gb.build()
-    
-    # Add star emoji for top 20
-    companies['moonfire_rank'] = companies['moonfire_rank'].apply(
-        lambda x: f"⭐ {x}" if x <= 20 else str(int(x))
-    )
-    
-    AgGrid(companies, gridOptions=gridOptions)
-
-    # Download button
-    csv = companies.to_csv(index=False)
-    st.download_button(
-        "Download Scorecard",
-        csv,
-        f"moonfire_scorecard_{datetime.now().strftime('%Y%m%d')}.csv",
-        "text/csv",
-        key='download-csv'
-    )
-
-    # Expanders
-    with st.expander("Methodology"):
-        st.markdown("""
-        The Golden-Triangle Scorecard evaluates startups based on three pillars:
+        # Fetch extra data if requested
+        if st.button("Fetch Extra Data"):
+            st.info("Fetching additional data... This may take a while.")
+            extra_data = {}
+            for _, row in companies.iterrows():
+                company_data = fetch_company_data(row['company'], row['website_url'])
+                extra_data[row['company']] = company_data
+            
+            # Update dataframe with extra data
+            companies['languages'] = companies['company'].map(lambda x: extra_data.get(x, {}).get('languages', 0))
+            companies['rating'] = companies['company'].map(lambda x: extra_data.get(x, {}).get('rating', 'N/A'))
         
-        1. ACCESS: Number of languages/locales supported (scaled 0-100)
-        2. EFFICIENCY: Capital raised USD ÷ employee count (scaled 0-100)
-        3. SERVICE QUALITY: Average rating from G2 or Capterra (raw score)
+        # Calculate pillar scores
+        companies['efficiency'] = companies['raised_usd'] / companies['employees']
         
-        Scores are normalized to a 0-100 scale and averaged to determine the overall score.
-        """)
+        # Handle any NaN values
+        companies = companies.replace([np.inf, -np.inf], np.nan)
+        companies = companies.fillna({
+            'efficiency': 0,
+            'languages': 0,
+            'rating': 'N/A'
+        })
 
-    with st.expander("Caveats/Next Steps"):
-        st.markdown("""
-        - Data fetching is rate-limited and may fail for some companies
-        - Ratings are scraped from G2/Capterra and may not be up-to-date
-        - Language detection is based on website metadata and may be incomplete
-        - Future improvements: Add more data sources, refine scoring, add more metrics
-        """)
+        # Scale scores to 0-100
+        scaler = MinMaxScaler(feature_range=(0, 100))
+        companies['access_score'] = scaler.fit_transform(companies[['languages']])
+        companies['efficiency_score'] = scaler.fit_transform(companies[['efficiency']])
+        companies['service_quality_score'] = companies['rating'].apply(
+            lambda x: 0 if x == 'N/A' else float(x)
+        )
+        
+        # Calculate overall score
+        companies['overall_score'] = companies[['access_score', 'efficiency_score', 'service_quality_score']].mean(axis=1)
+        companies['moonfire_rank'] = companies['overall_score'].rank(ascending=False)
+        
+        # Create scatter plot
+        fig = px.scatter(
+            companies,
+            x='languages',
+            y='efficiency',
+            size='service_quality_score',
+            color='country',
+            hover_data=['company', 'access_score', 'efficiency_score', 'service_quality_score'],
+            title="Golden-Triangle Scorecard Visualization"
+        )
+        st.plotly_chart(fig)
 
-    with st.expander("About You"):
-        st.markdown("""
-        Placeholder text for about section.
-        Add your information here.
-        """)
+        # Create Ag-Grid table
+        gb = GridOptionsBuilder.from_dataframe(companies)
+        gb.configure_pagination()
+        gb.configure_default_column(editable=False, groupable=True)
+        gb.configure_column("company", header_name="Company")
+        gb.configure_column("country", header_name="Country")
+        gb.configure_column("access_score", header_name="ACCESS Score")
+        gb.configure_column("efficiency_score", header_name="EFFICIENCY Score")
+        gb.configure_column("service_quality_score", header_name="SERVICE QUALITY Score")
+        gb.configure_column("overall_score", header_name="Overall Score")
+        gb.configure_column("moonfire_rank", header_name="Moonfire Rank")
+        
+        gridOptions = gb.build()
+        
+        # Add star emoji for top 20
+        companies['moonfire_rank'] = companies['moonfire_rank'].apply(
+            lambda x: f"⭐ {x}" if x <= 20 else str(int(x))
+        )
+        
+        AgGrid(companies, gridOptions=gridOptions)
+
+        # Download button
+        csv = companies.to_csv(index=False)
+        st.download_button(
+            "Download Scorecard",
+            csv,
+            f"moonfire_scorecard_{datetime.now().strftime('%Y%m%d')}.csv",
+            "text/csv",
+            key='download-csv'
+        )
+
+        # Expanders
+        with st.expander("Methodology"):
+            st.markdown("""
+            The Golden-Triangle Scorecard evaluates startups based on three pillars:
+            
+            1. ACCESS: Number of languages/locales supported (scaled 0-100)
+            2. EFFICIENCY: Total capital raised USD ÷ employee count (scaled 0-100)
+            3. SERVICE QUALITY: Average rating from G2 or Capterra (raw score)
+            
+            Scores are normalized to a 0-100 scale and averaged to determine the overall score.
+            """)
+
+        with st.expander("Caveats/Next Steps"):
+            st.markdown("""
+            - Data fetching is rate-limited and may fail for some companies
+            - Ratings are scraped from G2/Capterra and may not be up-to-date
+            - Language detection is based on website metadata and may be incomplete
+            - Future improvements: Add more data sources, refine scoring, add more metrics
+            """)
+
+        with st.expander("About You"):
+            st.markdown("""
+            Placeholder text for about section.
+            Add your information here.
+            """)
+
+    except Exception as e:
+        st.error(f"Error processing data: {str(e)}")
 
 if __name__ == "__main__":
     main()
