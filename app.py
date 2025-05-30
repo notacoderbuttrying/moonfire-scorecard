@@ -96,8 +96,32 @@ def main():
         df = pd.read_csv("deals.csv")
 
     # Process data
-    companies = df[['company', 'country', 'raised_usd', 'employees', 'website_url']].drop_duplicates()
-    
+    try:
+        # Try to use the expected column names
+        companies = df[['company', 'country', 'raised_usd', 'employees', 'website_url']].drop_duplicates()
+    except KeyError:
+        # If expected columns aren't found, try to map the actual column names
+        try:
+            companies = df[[
+                'results__funded_organization_identifier__value',
+                'country',  # This might not exist in the data
+                'results__money_raised__value_usd',
+                'employees',  # This might not exist in the data
+                'website_url'  # This might not exist in the data
+            ]].drop_duplicates()
+            companies.columns = ['company', 'country', 'raised_usd', 'employees', 'website_url']
+        except KeyError:
+            st.error("Error: Required columns not found in the dataset.")
+            return
+
+    # Add default values for missing columns
+    if 'country' not in companies.columns:
+        companies['country'] = 'Unknown'
+    if 'employees' not in companies.columns:
+        companies['employees'] = 1  # Default to 1 to avoid division by zero
+    if 'website_url' not in companies.columns:
+        companies['website_url'] = ''
+
     # Fetch extra data if requested
     if st.button("Fetch Extra Data"):
         st.info("Fetching additional data... This may take a while.")
@@ -112,6 +136,22 @@ def main():
     
     # Calculate pillar scores
     companies['efficiency'] = companies['raised_usd'] / companies['employees']
+    
+    # Handle any NaN values
+    companies = companies.replace([np.inf, -np.inf], np.nan)
+    companies = companies.fillna({
+        'efficiency': 0,
+        'languages': 0,
+        'rating': 'N/A'
+    })
+
+    # Scale scores to 0-100
+    scaler = MinMaxScaler(feature_range=(0, 100))
+    companies['access_score'] = scaler.fit_transform(companies[['languages']])
+    companies['efficiency_score'] = scaler.fit_transform(companies[['efficiency']])
+    companies['service_quality_score'] = companies['rating'].apply(
+        lambda x: 0 if x == 'N/A' else float(x)
+    )
     
     # Scale scores to 0-100
     scaler = MinMaxScaler(feature_range=(0, 100))
